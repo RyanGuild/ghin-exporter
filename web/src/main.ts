@@ -61,13 +61,12 @@ app.innerHTML = `
             <label class="check"><input type="checkbox" name="fmt" value="csv" checked /> CSV (scores + holes + profile)</label>
             <label class="check"><input type="checkbox" name="fmt" value="jsonl" checked /> JSONL</label>
             <label class="check"><input type="checkbox" name="fmt" value="xlsx" checked /> Excel (.xlsx)</label>
+            <label class="check">
+              <input type="checkbox" id="include-handicap" name="include-handicap" checked />
+              Include handicap revision history
+            </label>
           </div>
-
-          <label class="check">
-            <input type="checkbox" id="include-handicap" checked />
-            Include handicap revision history
-          </label>
-          <p class="hint">Credentials stay in this browser tab and are sent only to GHIN. They are not saved on this site.</p>
+          <p class="hint">When handicap history is checked, exports also include a handicap-history CSV / JSONL entry / Excel sheet. Credentials stay in this browser tab and are sent only to GHIN.</p>
         </fieldset>
 
         <div class="actions">
@@ -134,12 +133,16 @@ form.addEventListener("submit", async (event) => {
 
     const profilePayload = await client.getProfile();
     const scoresPayload = await client.getScores();
-    let handicap: unknown = {};
+    let handicap: unknown | null = null;
     if (includeHandicap) {
       try {
         handicap = await client.getHandicapHistory();
       } catch {
-        setStatus("Handicap history unavailable — continuing with scores…", "", true);
+        setStatus(
+          "Handicap history unavailable — continuing without it…",
+          "",
+          true,
+        );
         handicap = {};
       }
     }
@@ -161,8 +164,11 @@ form.addEventListener("submit", async (event) => {
       profile,
       handicap,
     );
+    const handicapNote = includeHandicap
+      ? " (with handicap history)"
+      : " (scores only)";
     setStatus(
-      `Done — ${scores.length} rounds, ${holes.length} hole rows. Downloaded: ${files.join(", ")}`,
+      `Done — ${scores.length} rounds, ${holes.length} hole rows${handicapNote}. Downloaded: ${files.join(", ")}`,
       "ok",
     );
   } catch (err) {
