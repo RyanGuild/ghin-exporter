@@ -40,10 +40,10 @@ app.innerHTML = `
               Recent rounds
               <select id="limit" name="limit">
                 <option value="5">Last 5</option>
-                <option value="10" selected>Last 10</option>
+                <option value="10">Last 10</option>
                 <option value="25">Last 25</option>
                 <option value="50">Last 50</option>
-                <option value="0">All available</option>
+                <option value="0" selected>All available</option>
               </select>
             </label>
             <label>
@@ -132,7 +132,10 @@ form.addEventListener("submit", async (event) => {
     }
 
     const profilePayload = await client.getProfile();
-    const scoresPayload = await client.getScores();
+    const limit = limitRaw > 0 ? limitRaw : null;
+    const scoresPayload = await client.getScores(undefined, {
+      maxScores: limit,
+    });
     let handicap: unknown | null = null;
     if (includeHandicap) {
       try {
@@ -148,7 +151,6 @@ form.addEventListener("submit", async (event) => {
     }
 
     setStatus("Building files…", "", true);
-    const limit = limitRaw > 0 ? limitRaw : null;
     const { scores, holes } = buildTables(scoresPayload, limit);
     const profile = profileSummary(profilePayload);
 

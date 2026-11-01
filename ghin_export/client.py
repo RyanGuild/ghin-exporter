@@ -178,11 +178,13 @@ class GhinClient:
         *,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        max_scores: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Fetch score history including hole_details when present.
+        """Fetch full score history (paginated).
 
-        Prefers GET /golfers/{id}/scores.json (bucketed history the web UI uses).
-        Falls back to GET /scores/search.json if the primary path fails.
+        /golfers/{id}/scores.json only returns the ~20 revision-window rows.
+        This pages GET /scores.json (limit/offset) until total_count is reached,
+        then falls back to /scores/search.json pages.
         """
         gid = golfer_id or self.golfer_id
         if not gid:
@@ -190,32 +192,126 @@ class GhinClient:
 
         logger.info("Fetching scorecards for golfer %s…", gid)
         try:
+            return self._fetch_scores_limit_offset(str(gid), max_scores)
+        except GhinApiError as exc:
+            logger.warning("scores.json paging failed (%s); trying search…", exc)
+            return self._fetch_scores_search_pages(
+                str(gid), max_scores, from_date=from_date, to_date=to_date
+            )
+
+    def _fetch_scores_limit_offset(
+        self, gid: str, max_scores: Optional[int]
+    ) -> dict[str, Any]:
+        page_size = 50
+        merged: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        offset = 0
+        total_count: Optional[int] = None
+        meta: dict[str, Any] = {}
+
+        while True:
             data = self._request(
                 "GET",
-                f"{API_BASE}/golfers/{gid}/scores.json",
-                params={"source": CLIENT_SOURCE},
-            )
-            if data:
-                return data
-        except GhinApiError as exc:
-            logger.warning("Primary scores endpoint failed (%s); trying search…", exc)
+                f"{API_BASE}/scores.json",
+                params={
+                    "golfer_id": gid,
+                    "source": CLIENT_SOURCE,
+                    "limit": str(page_size),
+                    "offset": str(offset),
+                },
+            ) or {}
+            batch = data.get("scores") if isinstance(data.get("scores"), list) else []
+            raw_total = data.get("total_count")
+            if isinstance(raw_total, (int, float)):
+                total_count = int(raw_total)
+            elif isinstance(raw_total, str) and raw_total not in ("", "-"):
+                try:
+                    total_count = int(float(raw_total))
+                except ValueError:
+                    pass
+            meta = {
+                "highest_score": data.get("highest_score"),
+                "lowest_score": data.get("lowest_score"),
+                "average": data.get("average"),
+                "total_count": total_count if total_count is not None else raw_total,
+            }
+            for score in batch:
+                if not isinstance(score, dict):
+                    continue
+                sid = score.get("id")
+                if sid is not None and sid in seen:
+                    continue
+                if sid is not None:
+                    seen.add(sid)
+                merged.append(score)
+                if max_scores is not None and len(merged) >= max_scores:
+                    break
+            if not batch:
+                break
+            if max_scores is not None and len(merged) >= max_scores:
+                break
+            if total_count is not None and len(merged) >= total_count:
+                break
+            if len(batch) < page_size:
+                break
+            offset += page_size
 
-        params: dict[str, str] = {
-            "golfer_id": str(gid),
-            "per_page": "100",
-            "page": "1",
-            "source": CLIENT_SOURCE,
-        }
-        if from_date:
-            params["from_date_played"] = from_date
-        if to_date:
-            params["to_date_played"] = to_date
-        data = self._request(
-            "GET",
-            f"{API_BASE}/scores/search.json",
-            params=params,
-        )
-        return data or {}
+        logger.info("Fetched %s scorecards.", len(merged))
+        return {**meta, "scores": merged}
+
+    def _fetch_scores_search_pages(
+        self,
+        gid: str,
+        max_scores: Optional[int],
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> dict[str, Any]:
+        per_page = 50
+        merged: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        page = 1
+
+        while True:
+            params: dict[str, str] = {
+                "golfer_id": gid,
+                "per_page": str(per_page),
+                "page": str(page),
+                "source": CLIENT_SOURCE,
+            }
+            if from_date:
+                params["from_date_played"] = from_date
+            if to_date:
+                params["to_date_played"] = to_date
+            data = self._request(
+                "GET",
+                f"{API_BASE}/scores/search.json",
+                params=params,
+            ) or {}
+            batch = data.get("Scores") or data.get("scores") or []
+            if not isinstance(batch, list):
+                batch = []
+            for score in batch:
+                if not isinstance(score, dict):
+                    continue
+                sid = score.get("id")
+                if sid is not None and sid in seen:
+                    continue
+                if sid is not None:
+                    seen.add(sid)
+                merged.append(score)
+                if max_scores is not None and len(merged) >= max_scores:
+                    break
+            if max_scores is not None and len(merged) >= max_scores:
+                break
+            if not batch or len(batch) < per_page:
+                break
+            page += 1
+            if page > 50:
+                break
+
+        logger.info("Fetched %s scorecards via search.", len(merged))
+        return {"scores": merged, "total_count": len(merged)}
 
     def get_handicap_history(
         self,
