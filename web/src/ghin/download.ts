@@ -44,10 +44,34 @@ function rowsToJsonl(rows: Record<string, unknown>[]): string {
   return `${rows.map((row) => JSON.stringify(row)).join("\n")}${rows.length ? "\n" : ""}`;
 }
 
+/** Flatten GHIN handicap_history payloads into spreadsheet rows. */
+export function handicapRevisionRows(
+  handicap: unknown,
+): Record<string, unknown>[] {
+  if (Array.isArray(handicap)) {
+    return handicap.filter(
+      (row): row is Record<string, unknown> =>
+        !!row && typeof row === "object" && !Array.isArray(row),
+    );
+  }
+  if (!handicap || typeof handicap !== "object") return [];
+  const root = handicap as Record<string, unknown>;
+  const revs =
+    root.handicap_revisions ?? root.revisions ?? root.handicap_history;
+  if (Array.isArray(revs)) {
+    return revs.filter(
+      (row): row is Record<string, unknown> =>
+        !!row && typeof row === "object" && !Array.isArray(row),
+    );
+  }
+  return Object.keys(root).length ? [root] : [];
+}
+
 export function downloadCsvBundle(
   scores: ScoreRow[],
   holes: HoleRow[],
   profile: Record<string, unknown>,
+  handicap: unknown | null = null,
 ): string[] {
   const tag = stamp();
   const files: string[] = [];
@@ -79,6 +103,29 @@ export function downloadCsvBundle(
     profileName,
   );
   files.push(profileName);
+
+  if (handicap != null) {
+    const histRows = handicapRevisionRows(handicap);
+    const histName = `ghin-handicap-history-${tag}.csv`;
+    const cols =
+      histRows.length > 0
+        ? Array.from(
+            histRows.reduce((set, row) => {
+              for (const key of Object.keys(row)) set.add(key);
+              return set;
+            }, new Set<string>()),
+          )
+        : ["note"];
+    const rows = histRows.length
+      ? histRows
+      : [{ note: "No handicap history returned" }];
+    triggerDownload(
+      new Blob([rowsToCsv(cols, rows)], { type: "text/csv;charset=utf-8" }),
+      histName,
+    );
+    files.push(histName);
+  }
+
   return files;
 }
 
@@ -86,7 +133,7 @@ export function downloadJsonlBundle(
   scores: ScoreRow[],
   holes: HoleRow[],
   profile: Record<string, unknown>,
-  handicap: unknown,
+  handicap: unknown | null = null,
 ): string[] {
   const tag = stamp();
   const files: string[] = [];
@@ -107,11 +154,19 @@ export function downloadJsonlBundle(
   );
   files.push(holesName);
 
-  const metaLines = [
+  const metaLines: Record<string, unknown>[] = [
     { type: "profile", ...profile },
-    { type: "export_meta", exported_at: new Date().toISOString(), score_count: scores.length, hole_count: holes.length },
-    { type: "handicap_history", data: handicap },
+    {
+      type: "export_meta",
+      exported_at: new Date().toISOString(),
+      score_count: scores.length,
+      hole_count: holes.length,
+      include_handicap_history: handicap != null,
+    },
   ];
+  if (handicap != null) {
+    metaLines.push({ type: "handicap_history", data: handicap });
+  }
   triggerDownload(
     new Blob([rowsToJsonl(metaLines)], { type: "application/x-ndjson" }),
     metaName,
@@ -124,7 +179,7 @@ export function downloadXlsxBundle(
   scores: ScoreRow[],
   holes: HoleRow[],
   profile: Record<string, unknown>,
-  handicap: unknown,
+  handicap: unknown | null = null,
 ): string {
   const tag = stamp();
   const filename = `ghin-export-${tag}.xlsx`;
@@ -143,20 +198,15 @@ export function downloadXlsxBundle(
   const profileSheet = XLSX.utils.json_to_sheet([profile]);
   XLSX.utils.book_append_sheet(book, profileSheet, "Profile");
 
-  let handicapRows: Record<string, unknown>[] = [];
-  if (Array.isArray(handicap)) {
-    handicapRows = handicap as Record<string, unknown>[];
-  } else if (handicap && typeof handicap === "object") {
-    const root = handicap as Record<string, unknown>;
-    const revs =
-      root.handicap_revisions ?? root.revisions ?? root.handicap_history;
-    if (Array.isArray(revs)) handicapRows = revs as Record<string, unknown>[];
-    else handicapRows = [root];
+  if (handicap != null) {
+    const handicapRows = handicapRevisionRows(handicap);
+    const histSheet = XLSX.utils.json_to_sheet(
+      handicapRows.length
+        ? handicapRows
+        : [{ note: "No handicap history returned" }],
+    );
+    XLSX.utils.book_append_sheet(book, histSheet, "HandicapHistory");
   }
-  const histSheet = XLSX.utils.json_to_sheet(
-    handicapRows.length ? handicapRows : [{ note: "No handicap history" }],
-  );
-  XLSX.utils.book_append_sheet(book, histSheet, "HandicapHistory");
 
   XLSX.writeFile(book, filename);
   return filename;
@@ -167,11 +217,11 @@ export function downloadSelectedFormats(
   scores: ScoreRow[],
   holes: HoleRow[],
   profile: Record<string, unknown>,
-  handicap: unknown,
+  handicap: unknown | null,
 ): string[] {
   const written: string[] = [];
   if (formats.includes("csv")) {
-    written.push(...downloadCsvBundle(scores, holes, profile));
+    written.push(...downloadCsvBundle(scores, holes, profile, handicap));
   }
   if (formats.includes("jsonl")) {
     written.push(...downloadJsonlBundle(scores, holes, profile, handicap));
