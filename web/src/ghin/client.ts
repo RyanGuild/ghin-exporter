@@ -116,28 +116,148 @@ export class GhinClient {
     });
   }
 
-  async getScores(golferId?: string): Promise<Record<string, unknown>> {
+  /**
+   * Fetch score history (not the ~20 revision-window rows from
+   * /golfers/{id}/scores.json). Pages /scores.json via limit+offset until
+   * total_count (or maxScores) is reached; falls back to search pages.
+   */
+  async getScores(
+    golferId?: string,
+    options: { maxScores?: number | null } = {},
+  ): Promise<Record<string, unknown>> {
     const gid = golferId ?? this.golferId;
     if (!gid) throw new GhinApiError("Missing golfer id.");
+    const maxScores =
+      options.maxScores != null && options.maxScores > 0
+        ? options.maxScores
+        : null;
     this.onProgress("Fetching scorecards…");
+
     try {
-      const primary = await this.request<Record<string, unknown>>(
-        "GET",
-        `${API_BASE}/golfers/${gid}/scores.json`,
-        { params: { source: CLIENT_SOURCE } },
-      );
-      if (primary) return primary;
-    } catch {
-      this.onProgress("Trying alternate score search…");
+      return await this.fetchScoresViaLimitOffset(gid, maxScores);
+    } catch (err) {
+      this.onProgress("Trying paginated score search…");
+      try {
+        return await this.fetchScoresViaSearchPages(gid, maxScores);
+      } catch {
+        throw err instanceof Error ? err : new GhinApiError(String(err));
+      }
     }
-    return this.request("GET", `${API_BASE}/scores/search.json`, {
-      params: {
-        golfer_id: gid,
-        per_page: "100",
-        page: "1",
-        source: CLIENT_SOURCE,
-      },
-    });
+  }
+
+  private async fetchScoresViaLimitOffset(
+    gid: string,
+    maxScores: number | null,
+  ): Promise<Record<string, unknown>> {
+    const pageSize = 50;
+    const merged: Record<string, unknown>[] = [];
+    const seen = new Set<unknown>();
+    let offset = 0;
+    let totalCount: number | null = null;
+    let meta: Record<string, unknown> = {};
+
+    while (true) {
+      const targetLabel =
+        maxScores != null
+          ? String(maxScores)
+          : totalCount != null
+            ? String(totalCount)
+            : null;
+      this.onProgress(
+        targetLabel
+          ? `Fetching scorecards… ${merged.length}/${targetLabel}`
+          : `Fetching scorecards… ${merged.length} so far`,
+      );
+      const data = await this.request<Record<string, unknown>>(
+        "GET",
+        `${API_BASE}/scores.json`,
+        {
+          params: {
+            golfer_id: gid,
+            source: CLIENT_SOURCE,
+            limit: String(pageSize),
+            offset: String(offset),
+          },
+        },
+      );
+      const batch = Array.isArray(data.scores)
+        ? (data.scores as Record<string, unknown>[])
+        : [];
+      if (typeof data.total_count === "number") totalCount = data.total_count;
+      else if (
+        typeof data.total_count === "string" &&
+        data.total_count !== "-"
+      ) {
+        const parsed = Number(data.total_count);
+        if (!Number.isNaN(parsed)) totalCount = parsed;
+      }
+      meta = {
+        highest_score: data.highest_score,
+        lowest_score: data.lowest_score,
+        average: data.average,
+        total_count: totalCount ?? data.total_count,
+      };
+      for (const score of batch) {
+        const id = score.id;
+        if (id != null && seen.has(id)) continue;
+        if (id != null) seen.add(id);
+        merged.push(score);
+        if (maxScores != null && merged.length >= maxScores) break;
+      }
+      if (batch.length === 0) break;
+      if (maxScores != null && merged.length >= maxScores) break;
+      if (totalCount != null && merged.length >= totalCount) break;
+      if (batch.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    this.onProgress(`Fetched ${merged.length} scorecards.`);
+    return { ...meta, scores: merged };
+  }
+
+  private async fetchScoresViaSearchPages(
+    gid: string,
+    maxScores: number | null,
+  ): Promise<Record<string, unknown>> {
+    const perPage = 50;
+    const merged: Record<string, unknown>[] = [];
+    const seen = new Set<unknown>();
+    let page = 1;
+
+    while (true) {
+      this.onProgress(`Fetching scorecards (search page ${page})…`);
+      const data = await this.request<Record<string, unknown>>(
+        "GET",
+        `${API_BASE}/scores/search.json`,
+        {
+          params: {
+            golfer_id: gid,
+            source: CLIENT_SOURCE,
+            per_page: String(perPage),
+            page: String(page),
+          },
+        },
+      );
+      const batch = Array.isArray(data.Scores)
+        ? (data.Scores as Record<string, unknown>[])
+        : Array.isArray(data.scores)
+          ? (data.scores as Record<string, unknown>[])
+          : [];
+      for (const score of batch) {
+        const id = score.id;
+        if (id != null && seen.has(id)) continue;
+        if (id != null) seen.add(id);
+        merged.push(score);
+        if (maxScores != null && merged.length >= maxScores) break;
+      }
+      if (maxScores != null && merged.length >= maxScores) break;
+      if (batch.length === 0 || batch.length < perPage) break;
+      page += 1;
+      if (page > 50) break; // hard safety stop
+    }
+
+    this.onProgress(`Fetched ${merged.length} scorecards.`);
+    return { scores: merged, total_count: merged.length };
   }
 
   async getHandicapHistory(
