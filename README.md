@@ -36,6 +36,10 @@ npm run build
 # output in web/dist — base path /ghin-exporter/
 ```
 
+## Excel Automate → Run
+
+Prefer pulling scorecards straight into Excel? Use **Automate → Run** with the Office Script in [`docs/power-automate-ghin.md`](docs/power-automate-ghin.md) (script + OneDrive `.osts` under `docs/power-automate/`).
+
 ## Optional Python CLI
 
 A read-only Python CLI remains under `ghin_export/` / `export_ghin.py` if you prefer the terminal. See `.env.example`. The web UI is the primary interface.
